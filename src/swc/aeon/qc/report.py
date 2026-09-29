@@ -11,16 +11,25 @@ from os import PathLike
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yaml
 
 from swc.aeon.io.api import Reader, load
-from swc.aeon.io.reader import Csv, Encoder, Harp, Heartbeat, Pose, Video
+from swc.aeon.io.reader import Binary, Csv, Encoder, Harp, Heartbeat, Pose, Video
 from swc.aeon.qc.environment import environment_state_durations, harp_sync_alerts, message_log_errors
+from swc.aeon.qc.ephys import (
+    WORST_N,
+    harp_sync_drift,
+    harp_sync_integrity,
+    onix_clock_sequence,
+    onix_hub_offset,
+)
 from swc.aeon.qc.epochs import epoch_gaps
 from swc.aeon.qc.harp import harp_gaps
 from swc.aeon.qc.heartbeat import heartbeat_duplicates, heartbeat_gaps
 from swc.aeon.qc.pellet import pellet_failures
+from swc.aeon.qc.reader import HarpSync
 from swc.aeon.qc.schemas import is_epoch_dir, normalise_timestamp
 from swc.aeon.qc.sequence import timestamp_order
 from swc.aeon.qc.sync import MIN_DEVICES, sync_delta
@@ -57,8 +66,9 @@ def run_qc(
     several rows per frame by design.
 
     Args:
-        root: Dataset root path, or a list of roots searched together. Epoch gaps are
-            computed on the first root only.
+        root: Dataset root path, or a list of roots searched together (behaviour root
+            first, then for example the ephys root recorded on another machine). Epoch
+            gaps are computed on the first root only.
         schema: DotMap of devices to stream readers.
         start: Left bound of the time range.
         end: Optional right bound of the time range.
@@ -152,6 +162,24 @@ def run_qc(
                 end=end_ts,
                 data=loaded.get("EnvironmentState"),
             )
+        for stream_name, reader in streams.items():
+            if isinstance(reader, HarpSync):
+                key = f"{device_name}.{stream_name}"
+                data = loaded.get(stream_name)
+                results[key] = harp_sync_integrity(root, reader, start=start_ts, end=end_ts, data=data)
+                results[f"{key}.drift"] = harp_sync_drift(
+                    root, reader, start=start_ts, end=end_ts, data=data
+                )
+            elif isinstance(reader, Binary) and hasattr(reader, "uniform"):
+                results[f"{device_name}.{stream_name}"] = onix_clock_sequence(
+                    root, reader, start=start_ts, end=end_ts
+                )
+                hub_name = stream_name.removesuffix("Clock") + "HubSyncCounter"
+                if hub_name in streams:
+                    results[f"{device_name}.{hub_name}"] = onix_hub_offset(
+                        root, reader, streams[hub_name], start=start_ts, end=end_ts
+                    )
+
     return results
 
 
@@ -181,6 +209,14 @@ def generate_report(
         metric = df.attrs.get("metric")
         if metric == "timestamp_order":
             report["devices"][device_name] = timestamp_order_section(df)
+        elif metric == "harp_sync_integrity":
+            report["devices"][device_name] = harp_sync_integrity_section(df)
+        elif metric == "harp_sync_drift":
+            report["devices"][device_name] = harp_sync_drift_section(df)
+        elif metric == "onix_clock_sequence":
+            report["devices"][device_name] = onix_clock_section(df)
+        elif metric == "onix_hub_offset":
+            report["devices"][device_name] = onix_hub_section(df)
         elif "gap_duration" in df.columns:
             report["devices"][device_name] = epoch_gaps_section(df)
         elif "count" in df.columns and "second" in df.columns:
@@ -560,6 +596,191 @@ def optional_float(value: Any, digits: int | None = None) -> float | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     return round(float(value), digits) if digits is not None else float(value)
+
+
+def histogram_section(counts: Any) -> dict[str, int]:
+    """Render a power-of-two magnitude histogram as ``{"0": n, "<2^k": n}``, non-empty buckets only."""
+    if counts is None:
+        return {}
+    out: dict[str, int] = {}
+    for k, n in enumerate(counts):
+        if n:
+            out["0" if k == 0 else f"<2^{k}"] = int(n)
+    return out
+
+
+def worst_section(worst: Any) -> list[dict[str, Any]]:
+    """Render the worst-deviation entries kept by an ONIX check for the YAML report."""
+    return [
+        {
+            "time": None if w.get("time") is None else w["time"].isoformat(),
+            "deviation_ticks": int(w["deviation_ticks"]),
+            "clock_ticks": int(w["clock_ticks"]),
+            "file": w["file"],
+            "index_in_file": int(w["index_in_file"]),
+        }
+        for w in (worst or [])
+    ]
+
+
+def harp_sync_integrity_section(df: pd.DataFrame) -> dict[str, Any]:
+    """Build the YAML section for a harp_sync_integrity result.
+
+    Lists every Harp-time fault and the steps whose clock step deviates most from the
+    median; every step is kept in the saved results.
+    """
+    summary: dict[str, Any] = {
+        "data_found": df.attrs.get("data_found", True),
+        "n_sync_events": int(df.attrs.get("n_sync_events", 0)),
+        "seconds_offset": optional_float(df.attrs.get("seconds_offset"), 3),
+        "clock_step_median_ticks": optional_float(df.attrs.get("clock_step_median_ticks"), 1),
+        "clock_step_ppm": optional_float(df.attrs.get("clock_step_ppm"), 2),
+        "n_faults": int(df.attrs.get("n_faults", 0)),
+        "n_harp_time_gap": int(df.attrs.get("n_harp_time_gap", 0)),
+        "n_harp_time_duplicate": int(df.attrs.get("n_harp_time_duplicate", 0)),
+        "n_harp_time_backwards": int(df.attrs.get("n_harp_time_backwards", 0)),
+        "deviation_median_abs_ticks": optional_float(df.attrs.get("deviation_median_abs_ticks"), 1),
+        "deviation_p99_abs_ticks": optional_float(df.attrs.get("deviation_p99_abs_ticks"), 1),
+        "deviation_max_abs_ticks": optional_float(df.attrs.get("deviation_max_abs_ticks"), 1),
+    }
+
+    def rows(frame: pd.DataFrame) -> list[dict[str, Any]]:
+        return [
+            {
+                "time": row.Index.isoformat(),
+                "kind": row.kind,
+                "harp_step": int(row.harp_step),
+                "clock_step_ticks": int(row.clock_step_ticks),
+                "deviation_ticks": None if pd.isna(row.deviation_ticks) else float(row.deviation_ticks),
+            }
+            for row in frame.itertuples()
+        ]
+
+    if df.empty:
+        return {"metric": "harp_sync_integrity", "summary": summary, "faults": [], "worst_steps": []}
+    faults = df[df["kind"] != "ok"]
+    advanced = df.dropna(subset=["deviation_ticks"])
+    order = advanced["deviation_ticks"].abs().sort_values(ascending=False).index[:WORST_N]
+    if len(faults) > DETAIL_ROW_CAP:
+        summary["faults_truncated_to"] = DETAIL_ROW_CAP
+    return {
+        "metric": "harp_sync_integrity",
+        "summary": summary,
+        "faults": rows(faults.head(DETAIL_ROW_CAP)),
+        "worst_steps": rows(advanced.loc[order]),
+    }
+
+
+def harp_sync_drift_section(df: pd.DataFrame) -> dict[str, Any]:
+    """Build the YAML section for a harp_sync_drift result: per-chunk fits, worst first."""
+    summary: dict[str, Any] = {
+        "data_found": df.attrs.get("data_found", True),
+        "n_sync_events": int(df.attrs.get("n_sync_events", 0)),
+        "n_chunks": int(df.attrs.get("n_chunks", 0)),
+        "n_clock_resets": int(df.attrs.get("n_clock_resets", 0)),
+        "worst_chunk_max_abs_residual_ms": optional_float(
+            df.attrs.get("worst_chunk_max_abs_residual_ms"), 4
+        ),
+        "nominal_clock_hz": df.attrs.get("nominal_clock_hz"),
+        "clock_rate_hz": optional_float(df.attrs.get("clock_rate_hz"), 1),
+        "clock_rate_ppm": optional_float(df.attrs.get("clock_rate_ppm"), 2),
+    }
+    chunks = df.attrs.get("chunks")
+    worst_chunks: list[dict[str, Any]] = []
+    if isinstance(chunks, pd.DataFrame) and "max_abs_residual_ms" in chunks:
+        ranked = chunks.dropna(subset=["max_abs_residual_ms"])
+        ranked = ranked.sort_values("max_abs_residual_ms", ascending=False)
+        summary["median_chunk_max_abs_residual_ms"] = optional_float(
+            ranked["max_abs_residual_ms"].median(), 4
+        )
+        summary["chunk_rate_ppm_min"] = optional_float(ranked["clock_rate_ppm"].min(), 2)
+        summary["chunk_rate_ppm_max"] = optional_float(ranked["clock_rate_ppm"].max(), 2)
+        worst_chunks = [
+            {
+                "chunk": pd.Timestamp(row.Index).isoformat(),
+                "n_sync_events": int(row.n_sync_events),
+                "clock_rate_ppm": optional_float(row.clock_rate_ppm, 2),
+                "max_abs_residual_ms": optional_float(row.max_abs_residual_ms, 4),
+            }
+            for row in ranked.head(WORST_N).itertuples()
+        ]
+    return {"metric": "harp_sync_drift", "summary": summary, "worst_chunks": worst_chunks}
+
+
+def onix_hub_section(df: pd.DataFrame) -> dict[str, Any]:
+    """Build the YAML section for an onix_hub_offset result."""
+    summary: dict[str, Any] = {
+        "data_found": df.attrs.get("data_found", True),
+        "n_samples": int(df.attrs.get("n_samples", 0)),
+        "n_files": int(df.attrs.get("n_files", 0)),
+        "nominal_offset_ticks": df.attrs.get("nominal_offset_ticks"),
+        "min_offset_ticks": df.attrs.get("min_offset_ticks"),
+        "max_offset_ticks": df.attrs.get("max_offset_ticks"),
+        "deviation_max_abs_ticks": df.attrs.get("deviation_max_abs_ticks"),
+        "n_length_mismatch": int(df["length_mismatch"].sum()) if not df.empty else 0,
+        "deviation_histogram": histogram_section(df.attrs.get("deviation_histogram")),
+    }
+    widest_files: list[dict[str, Any]] = []
+    if not df.empty:
+        spread = (df["max_offset_ticks"] - df["min_offset_ticks"]).astype(float)
+        widest = df.iloc[np.argsort(-spread.fillna(-1).to_numpy())[:WORST_N]]
+        widest_files = [
+            {
+                "time": None if pd.isna(row.Index) else row.Index.isoformat(),
+                "file": row.file,
+                "n_samples": int(row.n_samples),
+                "min_offset_ticks": None if pd.isna(row.min_offset_ticks) else int(row.min_offset_ticks),
+                "max_offset_ticks": None if pd.isna(row.max_offset_ticks) else int(row.max_offset_ticks),
+                "length_mismatch": bool(row.length_mismatch),
+            }
+            for row in widest.itertuples()
+        ]
+    return {
+        "metric": "onix_hub_offset",
+        "summary": summary,
+        "worst_samples": worst_section(df.attrs.get("worst")),
+        "widest_files": widest_files,
+    }
+
+
+def onix_clock_section(df: pd.DataFrame) -> dict[str, Any]:
+    """Build the YAML section for an onix_clock_sequence result."""
+    summary: dict[str, Any] = {
+        "data_found": df.attrs.get("data_found", True),
+        "n_samples": int(df.attrs.get("n_samples", 0)),
+        "n_files": int(df.attrs.get("n_files", 0)),
+        "nominal_step_ticks": df.attrs.get("nominal_step_ticks"),
+        "inferred_rate_hz": optional_float(df.attrs.get("inferred_rate_hz"), 3),
+        "clock_rate_hz": optional_float(df.attrs.get("clock_rate_hz"), 1),
+        "n_events": int(len(df)),
+        "n_backwards": int(df.attrs.get("n_backwards", 0)),
+        "n_duplicate": int(df.attrs.get("n_duplicate", 0)),
+        "n_jump": int(df.attrs.get("n_jump", 0)),
+        "deviation_max_abs_ticks": df.attrs.get("deviation_max_abs_ticks"),
+        "deviation_histogram": histogram_section(df.attrs.get("deviation_histogram")),
+    }
+    if df.attrs.get("truncated"):
+        summary["events_truncated"] = True
+    events = [
+        {
+            "time": None if pd.isna(row.Index) else row.Index.isoformat(),
+            "kind": row.kind,
+            "clock_ticks": int(row.clock_ticks),
+            "step_ticks": int(row.step_ticks),
+            "step_seconds": float(row.step_seconds),
+            "file": row.file,
+            "index_in_file": int(row.index_in_file),
+        }
+        for row in df.head(DETAIL_ROW_CAP).itertuples()
+    ]
+    if len(df) > DETAIL_ROW_CAP:
+        summary["detail_truncated_to"] = DETAIL_ROW_CAP
+    return {
+        "metric": "onix_clock_sequence",
+        "summary": summary,
+        "events": events,
+        "worst_steps": worst_section(df.attrs.get("worst")),
+    }
 
 
 def environment_state_section(df: pd.DataFrame) -> dict[str, Any]:

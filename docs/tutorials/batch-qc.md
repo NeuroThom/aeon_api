@@ -52,8 +52,8 @@ datasets:
 |---|---|---|
 | `name` | yes | Unique identifier, used as the output subdirectory name |
 | `root` | one of `root`/`roots` | Absolute path to the dataset root |
-| `roots` | one of `root`/`roots` | List of roots searched together, main dataset first. Epoch discovery and epoch gaps use the first root. |
-| `schema` | no | REGISTRY key. Omit it (or set `null`) to build the schema automatically: registry match on the root path, then `Metadata.yml` (Harp and camera devices), then filesystem discovery. A missing `schema` does not skip the dataset. |
+| `roots` | one of `root`/`roots` | List of roots searched together, behaviour root first. Use it when ephys data recorded on another machine lives under its own rig folder. The ONIX devices found in the later roots are added to the schema. Epoch discovery and epoch gaps use the first root. |
+| `schema` | no | REGISTRY key. Omit it (or set `null`) to build the schema automatically: registry match on the root path, then `Metadata.yml` (Harp, camera and ONIX devices), then filesystem discovery. A missing `schema` does not skip the dataset. |
 | `end` | no | UTC ISO 8601 timestamp capping the dataset. Only epochs whose `start` precedes this are processed. The final epoch's window closes here. Without it, the final epoch's `end` is found by scanning epoch directories on disk. If no subsequent epoch exists, the window is open-ended. |
 | `epochs` | yes | List of epoch entries. An empty list `[]` does not skip the dataset: every epoch directory under the first root is discovered and run, with the load window derived from the chunk filenames. Only a missing root skips a dataset. |
 | `epochs[].start` | yes | Epoch start timestamp in filesystem format (`2024-01-31T11-28-39`) or ISO 8601 (`2024-01-31T11:28:39+00:00`). Naive strings are assumed UTC |
@@ -69,6 +69,8 @@ datasets:
 | `social03` | Social 0.3 (AEON3/4) |
 | `social04` | Social 0.4 (AEON3/4) |
 | `octagon01` | Octagon 0.1 (OCTAGON01) |
+| `socialephys01` | ONIX ephys test recording (AEONX1, NeuropixelsV2Beta headstage) |
+| `abcephys01` | ForagingABC ephys (NeuropixelsV2 headstage only, paired with the behaviour root via `roots`) |
 
 ### Finding epoch start timestamps
 
@@ -131,7 +133,7 @@ benchmarks_output/
     ...
 ```
 
-The filename stem is `{label}_{start}` where `label` is the `phase` or `ssid` field from the epoch entry. The YAML report format is described in [Interactive QC, generating a YAML report](run-qc.md#generating-a-yaml-report). The console prints one verdict line per epoch (heartbeat gaps, frames dropped, order violations, streams with no data) so a run can be followed without opening the reports.
+The filename stem is `{label}_{start}` where `label` is the `phase` or `ssid` field from the epoch entry. The YAML report format is described in [Interactive QC, generating a YAML report](run-qc.md#generating-a-yaml-report). The console prints one verdict line per epoch (heartbeat gaps, frames dropped, order violations, ONIX anomalies, streams with no data) so a run can be followed without opening the reports.
 
 ---
 
@@ -181,7 +183,7 @@ print(f"{len(df)} heartbeat gap(s)")
 
 ## Adding a new dataset
 
-1. Find the dataset root on the cluster.
+1. Find the dataset root on the cluster. For an experiment with ephys, also find the ephys rig folder (the ephys machine robocopies to `raw/<COMPUTERNAME>/<experiment>/`) and list both under `roots`.
 2. Add an entry to `scripts/benchmarks.yaml`. Leave out `schema` unless the dataset needs a bespoke registry entry (octagon). Leave `epochs: []` to run every epoch on disk, or list the epochs you want with their phase labels.
 3. Run `scripts/dry_run_benchmarks.py` to confirm the roots and files are visible, then `scripts/run_benchmarks.py`.
 4. Run `scripts/summarise_benchmarks.py` and read `summary.md`.

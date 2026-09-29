@@ -1,6 +1,7 @@
 """Data quality control metrics for Project Aeon datasets."""
 
 from swc.aeon.qc.environment import environment_state_durations, harp_sync_alerts, message_log_errors
+from swc.aeon.qc.ephys import harp_sync_drift, harp_sync_integrity, onix_clock_sequence, onix_hub_offset
 from swc.aeon.qc.epochs import epoch_gaps
 from swc.aeon.qc.harp import harp_gaps
 from swc.aeon.qc.heartbeat import heartbeat_duplicates, heartbeat_gaps
@@ -30,6 +31,10 @@ __all__ = [
     "message_log_errors",
     "environment_state_durations",
     "timestamp_order",
+    "harp_sync_integrity",
+    "harp_sync_drift",
+    "onix_clock_sequence",
+    "onix_hub_offset",
     "run_qc",
     "generate_report",
     "save_results",

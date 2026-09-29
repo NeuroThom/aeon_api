@@ -61,7 +61,8 @@ def check_readers(epoch_dir: Path, schema: object, extra_roots: list[str] | None
     ``<epoch>/**/<reader.pattern>.<reader.extension>``) but without
     reading any files or applying time-window filtering. Readers with no
     file under ``epoch_dir`` are also looked up under ``extra_roots`` (any
-    epoch). Returns one "no files" message per reader that finds nothing.
+    epoch), which covers ephys data recorded on another machine. Returns one
+    "no files" message per reader that finds nothing.
     """
     issues: list[str] = []
     for qualified_name, reader in iter_readers(schema):

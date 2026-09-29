@@ -8,8 +8,9 @@ Options:
     --benchmarks PATH   Path to benchmarks.yaml (default: scripts/benchmarks.yaml)
     --output DIR        Output root directory (default: benchmarks_output)
 
-Each dataset gives a ``root`` (or a ``roots`` list searched together), an optional
-``schema`` registry key, and its epochs. See docs/tutorials/batch-qc.md for the manifest format.
+Each dataset gives a ``root`` (or a ``roots`` list with the behaviour root first and,
+for example, the ephys root recorded on another machine second), an optional ``schema``
+registry key, and its epochs. See docs/tutorials/batch-qc.md for the manifest format.
 """
 
 import argparse
@@ -56,7 +57,7 @@ def next_epoch_on_disk(root: str, start: pd.Timestamp) -> pd.Timestamp | None:
 
 def verdict(results: dict) -> str:
     """One-line summary of an epoch's results for the console."""
-    counts = {"hb gaps": 0, "frames dropped": 0, "order": 0, "no data": 0}
+    counts = {"hb gaps": 0, "frames dropped": 0, "order": 0, "onix": 0, "no data": 0}
     for df in results.values():
         metric = df.attrs.get("metric")
         if not df.attrs.get("data_found", True):
@@ -67,6 +68,10 @@ def verdict(results: dict) -> str:
             counts["frames dropped"] += int(df["n_dropped"].sum()) if len(df) else 0
         elif metric == "timestamp_order":
             counts["order"] += len(df)
+        elif metric == "harp_sync_integrity":
+            counts["onix"] += int(df.attrs.get("n_faults", 0))
+        elif metric == "onix_clock_sequence":
+            counts["onix"] += len(df)
     return ", ".join(f"{k} {v}" for k, v in counts.items())
 
 
@@ -93,6 +98,14 @@ def run_epoch(
     for key, df in results.items():
         if not df.attrs.get("data_found", True):
             print(f"      {key}: NO DATA")
+        elif df.attrs.get("metric") == "harp_sync_drift":
+            worst = df.attrs.get("worst_chunk_max_abs_residual_ms")
+            print(f"      {key}: {df.attrs.get('n_chunks', 0)} chunk fit(s), worst residual {worst} ms")
+        elif df.attrs.get("metric") == "harp_sync_integrity":
+            print(f"      {key}: {len(df)} step(s), {df.attrs.get('n_faults', 0)} fault(s)")
+        elif df.attrs.get("metric") == "onix_hub_offset":
+            deviation = df.attrs.get("deviation_max_abs_ticks")
+            print(f"      {key}: {len(df)} file(s), max deviation {deviation} ticks")
         elif df.empty:
             print(f"      {key}: 0 events")
         else:
