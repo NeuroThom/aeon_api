@@ -12,6 +12,7 @@ from dotmap import DotMap
 
 import swc.aeon.qc.foraging as _foraging
 import swc.aeon.qc.octagon as _octagon
+import swc.aeon.qc.onix as _onix
 import swc.aeon.qc.social as _social
 import swc.aeon.schema.core as stream
 from swc.aeon.io.api import load
@@ -160,12 +161,33 @@ octagon01 = DotMap(
     ]
 )
 
+# Ephys test recording on AEONX1 (social-ephys0.1): a NeuropixelsV2Beta headstage only.
+socialephys01 = DotMap(
+    [
+        Device("Metadata", stream.Metadata),
+        Device("NeuropixelsV2Beta", _onix.NeuropixelsV2Beta, _onix.ProbeA, _onix.ProbeB, _onix.Bno055),
+    ]
+)
+
+# ForagingABC ephys recordings (AEON3/AEON4 abcEphys01): a NeuropixelsV2 headstage. The
+# behaviour devices of those experiments are not in any registry yet; pass the behaviour
+# root first and the ephys root second so schema_from_metadata / schema_from_filesystem
+# discover them alongside this entry.
+abcephys01 = DotMap(
+    [
+        Device("Metadata", stream.Metadata),
+        Device("NeuropixelsV2", _onix.NeuropixelsV2, _onix.ProbeA, _onix.ProbeB, _onix.Bno055),
+    ]
+)
+
 REGISTRY: dict[str, Any] = {
     "exp02": exp02,
     "social02": social02,
     "social03": social03,
     "social04": social04,
     "octagon01": octagon01,
+    "socialephys01": socialephys01,
+    "abcephys01": abcephys01,
 }
 
 # Schemas whose epoch directories are standalone sessions, not chunks of a
@@ -208,7 +230,7 @@ def match_registry(root: str | PathLike) -> str | None:
     """Return the REGISTRY key for *root*, or ``None`` if no path component matches.
 
     Strips dots and hyphens and lowercases each component
-    (e.g. ``social0.4`` = ``social04``) before
+    (e.g. ``social0.4`` = ``social04``, ``social-ephys0.1`` = ``socialephys01``) before
     checking against REGISTRY.
     """
     for part in Path(root).parts:
@@ -280,7 +302,9 @@ def schema_from_metadata(root: str | PathLike) -> DotMap | None:
         device_type = str(getattr(device_cfg, "Type", ""))
         is_harp = bool(getattr(device_cfg, "PortName", None))
         is_camera = device_type == "SpinnakerVideoSource"
-        if is_harp:
+        if device_type.startswith("NeuropixelsV2"):
+            schema_devices.append(onix_device(device_name, device_type))
+        elif is_harp:
             schema_devices.append(Device(device_name, stream.Heartbeat))
         elif is_camera:
             schema_devices.append(Device(device_name, stream.Video))
@@ -288,15 +312,22 @@ def schema_from_metadata(root: str | PathLike) -> DotMap | None:
     return DotMap(schema_devices)
 
 
+def onix_device(name: str, type_or_name: str) -> Device:
+    """Return an ONIX headstage ``Device`` with its HarpSync, probe and BNO055 timing streams."""
+    headstage = _onix.NeuropixelsV2Beta if "Beta" in type_or_name else _onix.NeuropixelsV2
+    return Device(name, headstage, _onix.ProbeA, _onix.ProbeB, _onix.Bno055)
+
+
 def schema_from_filesystem(
     root: str | PathLike | Sequence[str | PathLike],
     start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> DotMap:
-    """Discover Heartbeat and Video devices by scanning the first epoch directory of each root."""
+    """Discover Heartbeat, Video and ONIX devices by scanning the first epoch directory of each root."""
     roots = [Path(root)] if isinstance(root, str | PathLike) else [Path(r) for r in root]
     harp_devices: list[str] = []
     video_devices: list[str] = []
+    onix_devices: list[str] = []
 
     for base in roots:
         first_epoch = base if is_epoch_dir(base) else first_epoch_dir(base, start, end)
@@ -308,12 +339,16 @@ def schema_from_filesystem(
                 harp_devices.append(name)
             if any(device_dir.glob("*.avi")):
                 video_devices.append(name)
+            if any(device_dir.glob(f"{name}_HarpSync_*.csv")):
+                onix_devices.append(name)
 
     schema_devices: list[Device] = [Device("Metadata", stream.Metadata)]
     for name in harp_devices:
         schema_devices.append(Device(name, stream.Heartbeat))
     for name in video_devices:
         schema_devices.append(Device(name, stream.Video))
+    for name in onix_devices:
+        schema_devices.append(onix_device(name, name))
 
     return DotMap(schema_devices)
 
@@ -325,11 +360,12 @@ def build_schema(
 ) -> DotMap:
     """Return the best available schema, trying registry, then Metadata.yml, then filesystem.
 
-    With several roots the registry and ``Metadata.yml`` lookups use the first root and
-    filesystem discovery scans every root.
+    With several roots the registry and ``Metadata.yml`` lookups use the first root (the
+    behaviour dataset); ONIX devices found in the remaining roots (for example an ephys
+    dataset recorded on another machine) are appended unless already present.
 
     Args:
-        root: Dataset root path, or a list of roots with the main dataset first.
+        root: Dataset root path, or a list of roots with the behaviour root first.
         start: Left bound of the time range, used for filesystem discovery.
         end: Right bound of the time range, used for filesystem discovery.
 
@@ -341,6 +377,11 @@ def build_schema(
     schema = schema_from_registry(roots[0]) or schema_from_metadata(roots[0])
     if schema is None:
         return schema_from_filesystem(roots, start, end)
+    if len(roots) > 1:
+        extra = schema_from_filesystem(roots[1:], start, end)
+        for name, streams in extra.items():
+            if name not in schema and isinstance(streams, dict) and "HarpSync" in streams:
+                schema[name] = streams
     return schema
 
 

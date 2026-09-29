@@ -79,6 +79,8 @@ extend-exclude = [
 "src/swc/aeon/qc/octagon.py"  = ["D101", "D106", "D107"]
 "src/swc/aeon/qc/social.py"   = ["D107", "D401"]
 "src/swc/aeon/qc/foraging.py" = ["D101", "D107"]
+"src/swc/aeon/qc/onix.py"     = ["D106", "D107"]
+"src/swc/aeon/qc/ephys.py"    = ["D107"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
