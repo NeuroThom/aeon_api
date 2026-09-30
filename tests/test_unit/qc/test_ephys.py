@@ -87,8 +87,8 @@ def test_clock_reader_is_uint64_binary_tagged_uniform(tmp_path):
     data = _CLOCK_READER.read(path)
     assert list(data.columns) == ["clock"]
     assert list(data["clock"]) == [1, 2, 2**40]
-    assert _CLOCK_READER.uniform is True
-    assert clock_reader("X_Bno055_Clock_*", uniform=False).uniform is False
+    assert _CLOCK_READER.uniform is True  # pyright: ignore[reportAttributeAccessIssue]
+    assert clock_reader("X_Bno055_Clock_*", uniform=False).uniform is False  # pyright: ignore[reportAttributeAccessIssue]
 
 
 # --- harp_sync_integrity ---
@@ -192,7 +192,7 @@ def test_drift_fits_each_hourly_chunk_separately():
         _CLOCK0 + (harp - harp[0]) * _TICKS_PER_SECOND,
         _CLOCK0 + (t0 - harp[0]) * _TICKS_PER_SECOND + (harp - t0) * (_TICKS_PER_SECOND + 2_500),
     )
-    data = make_harp_sync(list(harp), list(clock), seconds_offset=0)
+    data = make_harp_sync(harp.tolist(), clock.tolist(), seconds_offset=0)
     with patch(_PATCH, return_value=data):
         result = harp_sync_drift(_ROOT, _SYNC_READER, _START)
     chunks = result.attrs["chunks"]
@@ -408,7 +408,7 @@ def test_clock_sequence_flags_every_kind(tmp_path):
     assert result.attrs["n_backwards"] == 3
     assert result.attrs["n_jump"] == 4
     assert result.attrs["n_samples"] == 40
-    assert result.index.isna().all()
+    assert np.all(result.index.isna())
 
 
 def test_clock_sequence_checks_only_the_window_and_uses_harp_time(tmp_path):
@@ -434,6 +434,7 @@ def test_clock_sequence_checks_only_the_window_and_uses_harp_time(tmp_path):
     assert list(result["index_in_file"]) == [100, 101]
     expected = harp_time(_HARP0 + 299 * step / _TICKS_PER_SECOND)
     assert abs(result.index[0] - expected) < pd.Timedelta(microseconds=1)
+    assert isinstance(result.index, pd.DatetimeIndex)
     assert result.index.tz == datetime.UTC
     assert result.attrs["clock_rate_hz"] == pytest.approx(_TICKS_PER_SECOND)
     assert result.iloc[1]["step_seconds"] == pytest.approx(2 * step / _TICKS_PER_SECOND)
@@ -484,7 +485,7 @@ def test_hub_offset_summarises_every_file(tmp_path):
     assert list(result["n_samples"]) == [25, 15]
     assert list(result["min_offset_ticks"]) == [8_329, 8_329]
     assert list(result["max_offset_ticks"]) == [8_331, 8_331]
-    assert result.index.isna().all()
+    assert np.all(result.index.isna())
     assert result.attrs["n_samples"] == 40
     assert result.attrs["nominal_offset_ticks"] == 8_330
     assert result.attrs["deviation_histogram"].sum() == 40
